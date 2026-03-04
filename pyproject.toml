@@ -25,6 +25,7 @@ dependencies = [
     "torch>=2.0",
     "transformers>=4.36",
     "peft>=0.8",
+    "accelerate>=0.25",
     "sentence-transformers>=2.2",
     "pydantic>=2.0",
     "pyyaml>=6.0",
