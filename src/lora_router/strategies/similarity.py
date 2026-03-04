@@ -13,14 +13,8 @@ import numpy as np
 
 from lora_router.registry import AdapterRegistry
 from lora_router.strategies.base import BaseStrategy
+from lora_router.strategies.utils import cosine_similarity, softmax_confidence
 from lora_router.types import AdapterSelection
-
-
-def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> np.ndarray:
-    """Cosine similarity between vector a and matrix b (rows)."""
-    a_norm = a / (np.linalg.norm(a) + 1e-8)
-    b_norms = b / (np.linalg.norm(b, axis=1, keepdims=True) + 1e-8)
-    return b_norms @ a_norm
 
 
 class SimilarityStrategy(BaseStrategy):
@@ -72,13 +66,6 @@ class SimilarityStrategy(BaseStrategy):
         self._faiss_index.add(norm_matrix.astype(np.float32))
         self._faiss_names = names
 
-    def _softmax_confidence(self, similarities: np.ndarray) -> np.ndarray:
-        """Convert raw similarities to calibrated confidence scores via softmax."""
-        scaled = similarities / self._temperature
-        scaled -= scaled.max()
-        exp_scores = np.exp(scaled)
-        return exp_scores / (exp_scores.sum() + 1e-8)
-
     def route(
         self, query: str, registry: AdapterRegistry, top_k: int = 5
     ) -> list[AdapterSelection]:
@@ -98,13 +85,13 @@ class SimilarityStrategy(BaseStrategy):
             selected_names = [self._faiss_names[i] for i in indices[0]]
             selected_sims = distances[0]
         else:
-            similarities = _cosine_similarity(query_emb, matrix)
+            similarities = cosine_similarity(query_emb, matrix)
             k = min(top_k, len(names))
             top_indices = np.argsort(similarities)[::-1][:k]
             selected_names = [names[i] for i in top_indices]
             selected_sims = similarities[top_indices]
 
-        confidences = self._softmax_confidence(selected_sims)
+        confidences = softmax_confidence(selected_sims, self._temperature)
 
         return [
             AdapterSelection(
@@ -126,11 +113,11 @@ class SimilarityStrategy(BaseStrategy):
         results = []
 
         for query_emb in query_embs:
-            similarities = _cosine_similarity(query_emb, matrix)
+            similarities = cosine_similarity(query_emb, matrix)
             k = min(top_k, len(names))
             top_indices = np.argsort(similarities)[::-1][:k]
             selected_sims = similarities[top_indices]
-            confidences = self._softmax_confidence(selected_sims)
+            confidences = softmax_confidence(selected_sims, self._temperature)
 
             selections = [
                 AdapterSelection(

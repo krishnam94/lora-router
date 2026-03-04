@@ -13,6 +13,7 @@ import numpy as np
 
 from lora_router.registry import AdapterRegistry
 from lora_router.strategies.base import BaseStrategy
+from lora_router.strategies.utils import softmax_confidence
 from lora_router.types import AdapterSelection
 
 
@@ -120,12 +121,6 @@ class SEQRStrategy(BaseStrategy):
         projection = signature @ query_vec  # (rank,)
         return float(np.linalg.norm(projection))
 
-    def _softmax_confidence(self, scores: np.ndarray) -> np.ndarray:
-        scaled = scores / self._temperature
-        scaled -= scaled.max()
-        exp_scores = np.exp(scaled)
-        return exp_scores / (exp_scores.sum() + 1e-8)
-
     def route(
         self, query: str, registry: AdapterRegistry, top_k: int = 5
     ) -> list[AdapterSelection]:
@@ -159,7 +154,7 @@ class SEQRStrategy(BaseStrategy):
         adapter_scores = adapter_scores[:top_k]
 
         score_values = np.array([s for _, s in adapter_scores])
-        confidences = self._softmax_confidence(score_values)
+        confidences = softmax_confidence(score_values, self._temperature)
 
         return [
             AdapterSelection(

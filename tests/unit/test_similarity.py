@@ -6,7 +6,8 @@ import numpy as np
 import pytest
 
 from lora_router.registry import AdapterRegistry
-from lora_router.strategies.similarity import SimilarityStrategy, _cosine_similarity
+from lora_router.strategies.similarity import SimilarityStrategy
+from lora_router.strategies.utils import cosine_similarity
 from lora_router.types import AdapterInfo
 
 pytestmark = pytest.mark.unit
@@ -17,7 +18,7 @@ class TestCosineSimHelper:
         """Cosine similarity of identical vectors is 1.0."""
         a = np.array([1.0, 0.0, 0.0], dtype=np.float32)
         b = np.array([[1.0, 0.0, 0.0]], dtype=np.float32)
-        sims = _cosine_similarity(a, b)
+        sims = cosine_similarity(a, b)
         assert sims.shape == (1,)
         np.testing.assert_almost_equal(sims[0], 1.0, decimal=5)
 
@@ -25,14 +26,14 @@ class TestCosineSimHelper:
         """Cosine similarity of orthogonal vectors is 0.0."""
         a = np.array([1.0, 0.0, 0.0], dtype=np.float32)
         b = np.array([[0.0, 1.0, 0.0]], dtype=np.float32)
-        sims = _cosine_similarity(a, b)
+        sims = cosine_similarity(a, b)
         np.testing.assert_almost_equal(sims[0], 0.0, decimal=5)
 
     def test_opposite_vectors(self):
         """Cosine similarity of opposite vectors is -1.0."""
         a = np.array([1.0, 0.0], dtype=np.float32)
         b = np.array([[-1.0, 0.0]], dtype=np.float32)
-        sims = _cosine_similarity(a, b)
+        sims = cosine_similarity(a, b)
         np.testing.assert_almost_equal(sims[0], -1.0, decimal=5)
 
     def test_multiple_rows(self):
@@ -46,7 +47,7 @@ class TestCosineSimHelper:
             ],
             dtype=np.float32,
         )
-        sims = _cosine_similarity(a, b)
+        sims = cosine_similarity(a, b)
         assert sims.shape == (3,)
         np.testing.assert_almost_equal(sims[0], 1.0, decimal=3)
         np.testing.assert_almost_equal(sims[1], 0.0, decimal=3)
