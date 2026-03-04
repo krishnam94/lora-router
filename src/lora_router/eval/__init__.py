@@ -1,1 +1,1 @@
-"""Evaluation metrics and benchmarks."""
+"""Evaluation metrics, benchmarks, and report generation."""

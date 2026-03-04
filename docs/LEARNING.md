@@ -222,7 +222,9 @@ Our target: **>90% OOD** via ensemble routing + adaptive composition.
 | Adaptive composition | `composition/composer.py` | Confidence thresholds -> SINGLE/COMPOSE/FALLBACK |
 | Weight merging | `composition/merger.py` | LINEAR, TIES, DARE, CAT merge methods |
 | Main interface | `router.py: LoRARouter` | Combines strategy + composer, measures latency |
-| Evaluation | `eval/metrics.py` | Routing accuracy, MRR, NDCG, normalized oracle score |
+| Evaluation metrics | `eval/metrics.py` | Routing accuracy, MRR, NDCG, normalized oracle score |
+| Benchmark framework | `eval/benchmarks.py` | FlanV2Benchmark - load data, run eval, compare baselines |
+| Report generation | `eval/report.py` | Markdown tables and matplotlib plots |
 
 ---
 
@@ -257,3 +259,83 @@ Our target: **>90% OOD** via ensemble routing + adaptive composition.
 | **Subspace** | The "directions" in weight space that an adapter occupies |
 | **Rank** | Dimensionality of the LoRA decomposition (r in A: r x d, B: d x r) |
 | **Spectral routing** | Using eigenvalues/singular values of weight matrices for routing |
+
+---
+
+## 7. Session 2: Benchmark Infrastructure
+
+### What We Built
+
+Session 2 adds the evaluation infrastructure to measure how well our routing works against published baselines.
+
+### The FLAN v2 48-Task Benchmark
+
+This is the standard benchmark every LoRA routing paper uses. The setup:
+
+1. **48 tasks** from Google's FLAN v2 instruction-tuning dataset
+2. **10 clusters** grouping similar tasks (sentiment, NLI, translation, etc.)
+3. **One LoRA adapter per task**, all trained on LLaMA-2-7B
+4. **50 test samples per task** = 2,400 total test queries
+5. **Pre-trained adapters** available at `Styxxxx/llama2_7b_lora-{task}` on HuggingFace
+
+The benchmark tests: "Given a query, can the router pick the right adapter?"
+
+### Three Evaluation Regimes
+
+| Regime | What happens | Why it matters |
+|--------|-------------|----------------|
+| **Non-OOD** | All 48 adapters available, ground-truth adapter in pool | Easy mode - can we match oracle? |
+| **Semi-OOD** | Ground-truth adapter removed, but its training data stays | LORAUTER's special setting |
+| **OOD** | Ground-truth adapter fully removed | Hard mode - can we route to a similar adapter? |
+
+**OOD is the key number.** It measures generalization - when the exact adapter isn't available, can the router find a good substitute?
+
+### Evaluation Modes
+
+We have two modes:
+
+1. **Routing-only** (no GPU needed): Measures routing accuracy (did we pick the right adapter?), MRR, NDCG. Fast - runs in seconds with mock data.
+
+2. **Full evaluation** (needs GPU): Actually runs inference through the model with selected adapters, computes task metrics (EM, ROUGE, BLEU), and the normalized oracle score.
+
+### Task Metrics
+
+| Metric | Used for | How it works |
+|--------|----------|-------------|
+| **Exact Match (EM)** | Most tasks (36 NLU) | Case-insensitive string comparison after stripping |
+| **ROUGE-L** | Struct-to-text (4 tasks) | Longest common subsequence between prediction and reference |
+| **BLEU** | Translation (8 tasks) | N-gram overlap between prediction and reference |
+
+### Normalized Oracle Score
+
+This is LORAUTER's primary metric. For each task:
+
+```
+normalized_score = method_score / oracle_score * 100
+```
+
+Then average across all tasks. 100% means matching the oracle. >100% is possible when composition outperforms any single adapter.
+
+### Code Mapping (Session 2 additions)
+
+| Concept | Code location | What it does |
+|---------|--------------|--------------|
+| Benchmark config | `benchmarks/configs/flan_v2.yaml` | All 48 tasks, clusters, metrics, adapter HF IDs |
+| Config loading | `eval/benchmarks.py: FlanV2Config` | Parse YAML into typed config objects |
+| Test data | `eval/benchmarks.py: BenchmarkSample` | Input text + target + task + metric per sample |
+| Benchmark runner | `eval/benchmarks.py: FlanV2Benchmark` | Load data, build registry, evaluate routing |
+| Report generation | `eval/report.py` | Markdown tables, comparison tables, matplotlib plots |
+| Adapter download | `scripts/download_flan_adapters.py` | Download 48 Styxxxx adapters from HuggingFace |
+| CLI runner | `benchmarks/run_benchmark.py` | Command-line interface for running benchmarks |
+
+### New Jargon
+
+| Term | Meaning |
+|------|---------|
+| **EM (Exact Match)** | Binary metric - does the output exactly match the target? |
+| **ROUGE** | Recall-Oriented Understudy for Gisting Evaluation - overlap-based text metric |
+| **BLEU** | Bilingual Evaluation Understudy - n-gram precision metric for translation |
+| **Regime** | The evaluation setting (Non-OOD, Semi-OOD, OOD) controlling adapter availability |
+| **FLAN** | Finetuned Language Net - Google's instruction-tuning approach |
+| **Styxxxx adapters** | Pre-trained LoRA adapters on HuggingFace, one per FLAN v2 task |
+| **Cluster** | Semantic grouping of related tasks (e.g., all sentiment tasks form one cluster) |
