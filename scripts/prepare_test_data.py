@@ -81,7 +81,8 @@ def download_from_hf(
 ) -> int:
     """Download test data from HuggingFace lorahub/flanv2 dataset.
 
-    Samples from each task's test split and formats into LoraRetriever format.
+    The dataset has a single default config with a 'task' column.
+    We load the full dataset once, then filter per task.
 
     Returns:
         Number of samples saved.
@@ -90,32 +91,79 @@ def download_from_hf(
 
     all_samples: list[dict[str, str]] = []
 
-    for task_name in FLAN_V2_TASKS:
-        cluster = CLUSTER_MAP[task_name]
+    # Load the full dataset once (single default config)
+    print("  Loading lorahub/flanv2 dataset...")
+    try:
+        ds = load_dataset("lorahub/flanv2", split="test")
+    except Exception:
+        # Try train split if test doesn't exist
+        try:
+            ds = load_dataset("lorahub/flanv2", split="train")
+        except Exception as e:
+            print(f"  [FAIL] Could not load lorahub/flanv2: {e}")
+            print("  Trying individual task datasets as fallback...")
+            return _download_individual_tasks(output_path, samples_per_task)
+
+    # Figure out column names
+    columns = ds.column_names
+    print(f"  Columns: {columns}")
+    print(f"  Total rows: {len(ds)}")
+
+    # Detect task column name
+    task_col = None
+    for candidate in ["task", "task_name", "dataset", "source"]:
+        if candidate in columns:
+            task_col = candidate
+            break
+
+    if task_col is None:
+        print(f"  [WARN] No task column found in {columns}. Using full dataset approach.")
+        # If no task column, try to use the data as-is
+        return _download_individual_tasks(output_path, samples_per_task)
+
+    # Get unique tasks in the dataset
+    unique_tasks = set(ds[task_col])
+    print(f"  Unique tasks in dataset: {len(unique_tasks)}")
+
+    # Build a mapping from our task names to dataset task names
+    task_name_map: dict[str, str] = {}
+    for our_name in FLAN_V2_TASKS:
+        if our_name in unique_tasks:
+            task_name_map[our_name] = our_name
+        else:
+            # Try variations
+            for ds_name in unique_tasks:
+                if ds_name.replace("-", "_") == our_name or ds_name.replace(" ", "_").lower() == our_name:
+                    task_name_map[our_name] = ds_name
+                    break
+
+    print(f"  Matched {len(task_name_map)}/{len(FLAN_V2_TASKS)} tasks")
+
+    # Detect input/output columns
+    input_col = next((c for c in ["inputs", "input", "question", "text"] if c in columns), columns[0])
+    target_col = next((c for c in ["targets", "target", "answer", "output", "label"] if c in columns), columns[1] if len(columns) > 1 else columns[0])
+
+    for our_name in FLAN_V2_TASKS:
+        ds_name = task_name_map.get(our_name)
+        if ds_name is None:
+            print(f"  [SKIP] {our_name} (not in dataset)")
+            continue
+
+        cluster = CLUSTER_MAP[our_name]
         metric = CLUSTER_METRICS[cluster]
 
-        try:
-            # lorahub/flanv2 is organized by task name
-            ds = load_dataset("lorahub/flanv2", task_name, split="test", trust_remote_code=True)
-        except Exception as e:
-            print(f"  [WARN] Could not load {task_name}: {e}")
-            # Try alternate naming (underscores to hyphens, etc.)
-            try:
-                alt_name = task_name.replace("_", "-")
-                ds = load_dataset("lorahub/flanv2", alt_name, split="test", trust_remote_code=True)
-            except Exception:
-                print(f"  [SKIP] {task_name}")
-                continue
+        # Filter dataset for this task
+        task_ds = ds.filter(lambda x: x[task_col] == ds_name)
+        n = min(samples_per_task, len(task_ds))
+        if n == 0:
+            print(f"  [SKIP] {our_name} (0 samples)")
+            continue
 
-        # Sample up to samples_per_task
-        n = min(samples_per_task, len(ds))
-        indices = list(range(n))
-        subset = ds.select(indices)
+        subset = task_ds.select(range(n))
 
         for row in subset:
-            # HF dataset typically has 'inputs' and 'targets' columns
-            input_text = row.get("inputs", row.get("input", row.get("question", "")))
-            target_text = row.get("targets", row.get("target", row.get("answer", "")))
+            input_text = str(row.get(input_col, ""))
+            target_text = row.get(target_col, "")
 
             # Handle list-type targets (some datasets return lists)
             if isinstance(target_text, list):
@@ -124,18 +172,139 @@ def download_from_hf(
             all_samples.append({
                 "inputs": str(input_text),
                 "targets": str(target_text),
-                "task": task_name,
+                "task": our_name,
                 "domain": cluster,
                 "metric": metric,
             })
 
-        print(f"  [{n:3d}] {task_name}")
+        print(f"  [{n:3d}] {our_name}")
 
     # Save
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, "w") as f:
         json.dump(all_samples, f, indent=2)
 
+    return len(all_samples)
+
+
+def _download_individual_tasks(
+    output_path: Path,
+    samples_per_task: int = 50,
+) -> int:
+    """Fallback: download from individual HF datasets per task.
+
+    Uses the Styxxxx adapter repos which often have training data,
+    or well-known HF datasets for each task.
+    """
+    from datasets import load_dataset
+
+    # Map our task names to known HF dataset IDs
+    task_to_hf: dict[str, tuple[str, str | None]] = {
+        "arc_challenge": ("allenai/ai2_arc", "ARC-Challenge"),
+        "arc_easy": ("allenai/ai2_arc", "ARC-Easy"),
+        "bool_q": ("google/boolq", None),
+        "cb": ("aps/super_glue", "cb"),
+        "copa": ("aps/super_glue", "copa"),
+        "rte": ("aps/super_glue", "rte"),
+        "wsc": ("aps/super_glue", "wsc.fixed"),
+        "multirc": ("aps/super_glue", "multirc"),
+        "record": ("aps/super_glue", "record"),
+        "hellaswag": ("Rowan/hellaswag", None),
+        "piqa": ("ybisk/piqa", None),
+        "sst2": ("stanfordnlp/sst2", None),
+        "mnli_matched": ("nyu-mll/glue", "mnli"),
+        "mnli_mismatched": ("nyu-mll/glue", "mnli"),
+        "qnli": ("nyu-mll/glue", "qnli"),
+        "glue_mrpc": ("nyu-mll/glue", "mrpc"),
+        "glue_qqp": ("nyu-mll/glue", "qqp"),
+        "stsb": ("nyu-mll/glue", "stsb"),
+        "wnli": ("nyu-mll/glue", "wnli"),
+        "snli": ("stanfordnlp/snli", None),
+        "imdb_reviews": ("stanfordnlp/imdb", None),
+        "squad_v1": ("rajpurkar/squad", None),
+        "squad_v2": ("rajpurkar/squad_v2", None),
+        "drop": ("ucinlp/drop", None),
+        "openbookqa": ("allenai/openbookqa", None),
+        "cosmos_qa": ("cosmos_qa", None),
+        "anli_r1": ("facebook/anli", None),
+        "anli_r2": ("facebook/anli", None),
+        "anli_r3": ("facebook/anli", None),
+        "common_gen": ("allenai/common_gen", None),
+        "trivia_qa": ("mandarjoshi/trivia_qa", "rc"),
+        "natural_questions": ("google-research-datasets/natural_questions", None),
+    }
+
+    all_samples: list[dict[str, str]] = []
+    loaded = 0
+
+    for task_name in FLAN_V2_TASKS:
+        cluster = CLUSTER_MAP[task_name]
+        metric = CLUSTER_METRICS[cluster]
+
+        hf_info = task_to_hf.get(task_name)
+        if hf_info is None:
+            print(f"  [SKIP] {task_name} (no HF mapping)")
+            continue
+
+        dataset_id, config = hf_info
+
+        try:
+            if config:
+                ds = load_dataset(dataset_id, config, split="validation")
+            else:
+                # Try validation first, then test
+                try:
+                    ds = load_dataset(dataset_id, split="validation")
+                except Exception:
+                    ds = load_dataset(dataset_id, split="test")
+        except Exception as e:
+            print(f"  [SKIP] {task_name}: {e}")
+            continue
+
+        n = min(samples_per_task, len(ds))
+        subset = ds.select(range(n))
+
+        # Generic column extraction
+        cols = subset.column_names
+        for row in subset:
+            # Try common input column names
+            input_text = ""
+            for col in ["question", "premise", "sentence", "sentence1", "text", "passage"]:
+                if col in cols and row[col]:
+                    input_text = str(row[col])
+                    break
+            if not input_text and cols:
+                input_text = str(row[cols[0]])
+
+            # Try common target column names
+            target_text = ""
+            for col in ["answer", "label", "answers", "target", "hypothesis"]:
+                if col in cols and row[col] is not None:
+                    val = row[col]
+                    if isinstance(val, dict) and "text" in val:
+                        target_text = str(val["text"][0]) if val["text"] else ""
+                    elif isinstance(val, list):
+                        target_text = str(val[0]) if val else ""
+                    else:
+                        target_text = str(val)
+                    break
+
+            all_samples.append({
+                "inputs": input_text,
+                "targets": target_text,
+                "task": task_name,
+                "domain": cluster,
+                "metric": metric,
+            })
+
+        loaded += 1
+        print(f"  [{n:3d}] {task_name}")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, "w") as f:
+        json.dump(all_samples, f, indent=2)
+
+    print(f"\n  Loaded {loaded}/{len(FLAN_V2_TASKS)} tasks via individual datasets")
     return len(all_samples)
 
 
