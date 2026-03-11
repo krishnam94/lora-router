@@ -3,8 +3,8 @@
 #
 # Prerequisites:
 #   - RunPod RTX 4090 (24GB VRAM), PyTorch 2.4 template
-#   - Container disk: 50GB, Volume disk: 20GB
-#   - HuggingFace token with LLaMA-2 access (meta-llama/Llama-2-7b-hf)
+#   - Container disk: 50GB+ (100GB recommended), Volume disk: 20GB
+#   - HuggingFace token (Read access)
 #
 # Usage:
 #   # Set your HF token first
@@ -37,6 +37,11 @@ NC='\033[0m'
 info() { echo -e "${GREEN}[INFO]${NC} $*"; }
 warn() { echo -e "${YELLOW}[WARN]${NC} $*"; }
 fail() { echo -e "${RED}[FAIL]${NC} $*"; exit 1; }
+
+# Redirect HuggingFace cache to workspace volume (avoids filling container disk)
+export HF_HOME="/workspace/hf_cache"
+export TRANSFORMERS_CACHE="/workspace/hf_cache"
+export HUGGINGFACE_HUB_CACHE="/workspace/hf_cache/hub"
 
 # Paths - use RunPod persistent volume for models
 WORKSPACE="/workspace"
@@ -75,6 +80,8 @@ fi
 info "Step 2/6: Install Python dependencies"
 pip install -e ".[eval,dev]" --quiet 2>&1 | tail -n 3
 pip install accelerate --quiet
+pip cache purge 2>/dev/null || true
+rm -rf /root/.cache/pip 2>/dev/null || true
 
 # Login to HuggingFace
 if [ -n "${HF_TOKEN:-}" ]; then
@@ -82,24 +89,17 @@ if [ -n "${HF_TOKEN:-}" ]; then
 fi
 
 # Step 3: Download base model (to persistent volume)
+# Uses NousResearch ungated mirror (same weights as meta-llama/Llama-2-7b-hf)
 info "Step 3/6: Download LLaMA-2-7B base model"
 if [ -d "${MODEL_DIR}" ] && [ -f "${MODEL_DIR}/config.json" ]; then
     info "  Base model already downloaded, skipping"
 else
-    if [ -z "${HF_TOKEN:-}" ]; then
-        warn "  Skipping base model download (no HF_TOKEN)"
-    else
-        mkdir -p "${MODEL_DIR}"
-        python -c "
+    mkdir -p "${MODEL_DIR}"
+    python -c "
 from huggingface_hub import snapshot_download
-snapshot_download(
-    'meta-llama/Llama-2-7b-hf',
-    local_dir='${MODEL_DIR}',
-    token='${HF_TOKEN}',
-)
+snapshot_download('NousResearch/Llama-2-7b-hf', local_dir='${MODEL_DIR}')
 print('Base model downloaded successfully')
 "
-    fi
 fi
 
 # Step 4: Download 48 LoRA adapters
