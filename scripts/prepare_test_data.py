@@ -139,6 +139,10 @@ def download_from_hf(
 
     print(f"  Matched {len(task_name_map)}/{len(FLAN_V2_TASKS)} tasks")
 
+    if len(task_name_map) == 0:
+        print("  No tasks matched. Falling back to individual datasets...")
+        return _download_individual_tasks(output_path, samples_per_task)
+
     # Detect input/output columns
     input_col = next((c for c in ["inputs", "input", "question", "text"] if c in columns), columns[0])
     target_col = next((c for c in ["targets", "target", "answer", "output", "label"] if c in columns), columns[1] if len(columns) > 1 else columns[0])
